@@ -1,16 +1,16 @@
 // routes/auth.js
 import { Router } from "express";
 import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
+import bcrypt from "bcryptjs"; // für Reset
 import crypto from "crypto";
 import User from "../models/User.js";
-import PasswordReset from "../models/passwordReset.js";
+import PasswordReset from "../models/PasswordReset.js"; // <-- Wichtig: großes P!
 
 // Social
 import { OAuth2Client } from "google-auth-library";
 import appleSignin from "apple-signin-auth";
 
-// WebAuthn
+// WebAuthn (Passkeys)
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -21,15 +21,19 @@ import {
 const router = Router();
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// ----------------- Helpers -----------------
+// ---------- Helpers ----------
 function signToken(userId) {
   const secret = process.env.JWT_SECRET || "dev_secret_change_me";
   return jwt.sign({ sub: String(userId) }, secret, { expiresIn: "7d" });
 }
-const RP_ID = process.env.RP_ID || "localhost";
-const RP_NAME = process.env.RP_NAME || "CYP Demo";
 
-// ----------------- Register ----------------
+const CLIENT_ORIGIN = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/$/, "");
+const RP_ID = process.env.RP_ID || (CLIENT_ORIGIN.startsWith("http") ? new URL(CLIENT_ORIGIN).hostname : "localhost");
+const RP_NAME = process.env.RP_NAME || "CYP";
+
+// ======================================================================
+// REGISTER
+// ======================================================================
 router.post("/register", async (req, res, next) => {
   try {
     const name = (req.body.name || "").trim();
@@ -39,11 +43,13 @@ router.post("/register", async (req, res, next) => {
     if (!name || !email || !password) {
       return res.status(400).json({ message: "Missing name, email or password" });
     }
+
     const existing = await User.findOne({ email }).lean();
     if (existing) return res.status(409).json({ message: "Email already registered" });
 
-    const hash = await bcrypt.hash(password, 10);
-    const user = await User.create({ name, email, password: hash });
+    const user = new User({ name, email });
+    await user.setPassword(password); // setzt passwordHash
+    await user.save();
 
     const token = signToken(user._id);
     res.status(201).json({ ok: true, token, user: { id: user._id, name, email } });
@@ -52,7 +58,9 @@ router.post("/register", async (req, res, next) => {
   }
 });
 
-// ----------------- Login -------------------
+// ======================================================================
+// LOGIN
+// ======================================================================
 router.post("/login", async (req, res, next) => {
   try {
     const email = (req.body.email || "").trim().toLowerCase();
@@ -60,9 +68,9 @@ router.post("/login", async (req, res, next) => {
     if (!email || !password) return res.status(400).json({ message: "Missing email or password" });
 
     const user = await User.findOne({ email });
-    if (!user || !user.password) return res.status(401).json({ message: "Invalid credentials" });
+    if (!user || !user.passwordHash) return res.status(401).json({ message: "Invalid credentials" });
 
-    const ok = await bcrypt.compare(password, user.password);
+    const ok = await user.comparePassword(password); // vergleicht passwordHash
     if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
     const token = signToken(user._id);
@@ -73,31 +81,27 @@ router.post("/login", async (req, res, next) => {
 });
 
 // ======================================================================
-//                      PASSWORD RESET
+// PASSWORD RESET
 // ======================================================================
-
-// 1) Reset anfordern
 router.post("/request-password-reset", async (req, res, next) => {
   try {
     const email = (req.body.email || "").trim().toLowerCase();
     if (!email) return res.status(400).json({ message: "Missing email" });
 
     const user = await User.findOne({ email }).lean();
-    // Keine Information leaken, ob es den User gibt:
+    // kein User? trotzdem ok (nichts leaken)
     if (!user) return res.json({ ok: true });
 
-    // Token generieren & als Hash speichern
     const rawToken = crypto.randomBytes(32).toString("hex");
     const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
 
     await PasswordReset.create({
       userId: user._id,
       tokenHash,
-      expiresAt: new Date(Date.now() + 1000 * 60 * 15), // 15 Min
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 Min
     });
 
-    const resetUrl = `${process.env.CLIENT_URL?.replace(/\/$/, "") || "http://localhost:3000"}/reset-password?token=${rawToken}`;
-    // TODO: E-Mail versenden – jetzt erstmal in die Konsole:
+    const resetUrl = `${CLIENT_ORIGIN}/reset-password?token=${rawToken}`;
     console.log("🔗 Password reset link:", resetUrl);
 
     res.json({ ok: true, message: "If the email exists, a reset link was sent." });
@@ -106,7 +110,6 @@ router.post("/request-password-reset", async (req, res, next) => {
   }
 });
 
-// 2) Passwort setzen
 router.post("/reset-password", async (req, res, next) => {
   try {
     const rawToken = String(req.body.token || "");
@@ -114,13 +117,17 @@ router.post("/reset-password", async (req, res, next) => {
     if (!rawToken || !newPassword) return res.status(400).json({ message: "Missing token or password" });
 
     const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
-    const entry = await PasswordReset.findOne({ tokenHash, used: false, expiresAt: { $gt: new Date() } });
+    const entry = await PasswordReset.findOne({
+      tokenHash,
+      used: false,
+      expiresAt: { $gt: new Date() },
+    });
     if (!entry) return res.status(400).json({ message: "Invalid or expired token" });
 
     const user = await User.findById(entry.userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    user.password = await bcrypt.hash(newPassword, 10);
+    await user.setPassword(newPassword);
     await user.save();
 
     entry.used = true;
@@ -133,10 +140,8 @@ router.post("/reset-password", async (req, res, next) => {
 });
 
 // ======================================================================
-//                      SOCIAL LOGINS
+// GOOGLE LOGIN
 // ======================================================================
-
-// Google: Client liefert ein ID Token (Google One Tap / Client OAuth)
 router.post("/google", async (req, res, next) => {
   try {
     const idToken = String(req.body.idToken || "");
@@ -150,15 +155,14 @@ router.post("/google", async (req, res, next) => {
     if (!payload || !payload.email) return res.status(401).json({ message: "Invalid Google token" });
 
     const email = payload.email.toLowerCase();
-    const providerId = payload.sub;
+    const googleId = payload.sub;
     const name = payload.name || email.split("@")[0];
 
     let user = await User.findOne({ email });
     if (!user) {
-      user = await User.create({ name, email, provider: "google", providerId });
-    } else if (!user.provider) {
-      user.provider = "google";
-      user.providerId = providerId;
+      user = await User.create({ name, email, googleId });
+    } else if (!user.googleId) {
+      user.googleId = googleId;
       await user.save();
     }
 
@@ -169,29 +173,29 @@ router.post("/google", async (req, res, next) => {
   }
 });
 
-// Apple (Platzhalter – brauchst Team-ID, Key-ID, private key etc.)
+// ======================================================================
+// APPLE LOGIN (Platzhalter – benötigt Apple Keys/Konfiguration)
+// ======================================================================
 router.post("/apple", async (req, res, next) => {
   try {
     const identityToken = String(req.body.identityToken || "");
     if (!identityToken) return res.status(400).json({ message: "Missing identityToken" });
 
-    // Doku: https://github.com/ananay/apple-signin-auth
     const resp = await appleSignin.verifyIdToken(identityToken, {
-      audience: process.env.APPLE_CLIENT_ID, // Bundle ID / Service ID
+      audience: process.env.APPLE_CLIENT_ID,
     });
 
     const email = (resp.email || "").toLowerCase();
-    const providerId = resp.sub;
+    const appleId = resp.sub;
     const name = req.body.name || email.split("@")[0];
 
     if (!email) return res.status(401).json({ message: "Invalid Apple token" });
 
     let user = await User.findOne({ email });
     if (!user) {
-      user = await User.create({ name, email, provider: "apple", providerId });
-    } else if (!user.provider) {
-      user.provider = "apple";
-      user.providerId = providerId;
+      user = await User.create({ name, email, appleId });
+    } else if (!user.appleId) {
+      user.appleId = appleId;
       await user.save();
     }
 
@@ -203,10 +207,10 @@ router.post("/apple", async (req, res, next) => {
 });
 
 // ======================================================================
-//                      WEBAuthn / PASSKEYS (Skeleton)
+// WEBAuthn (Passkeys) – an dein Model `webAuthn` angepasst
 // ======================================================================
 
-// In-Memory Challenge-Store für Demo (in Prod z.B. Redis)
+// Mini-Store für Challenges (in Prod: Redis/DB)
 const pending = new Map(); // key: userId -> { challenge }
 
 router.get("/webauthn/registration/options", async (req, res, next) => {
@@ -221,8 +225,14 @@ router.get("/webauthn/registration/options", async (req, res, next) => {
       userID: String(user._id),
       userName: email,
       attestationType: "none",
-      // existierende Credentials ausschließen:
-      excludeCredentials: user.passkeys.map(pk => ({ id: Buffer.from(pk.credId, "base64url"), type: "public-key" })),
+      excludeCredentials: user.webAuthn?.credentialId
+        ? [
+            {
+              id: Buffer.from(user.webAuthn.credentialId, "base64url"),
+              type: "public-key",
+            },
+          ]
+        : [],
     });
 
     pending.set(String(user._id), { challenge: options.challenge });
@@ -241,7 +251,7 @@ router.post("/webauthn/registration/verify", async (req, res, next) => {
     const verification = await verifyRegistrationResponse({
       response: attestationResponse,
       expectedChallenge: pend.challenge,
-      expectedOrigin: req.headers.origin || `http://${RP_ID}:3000`,
+      expectedOrigin: CLIENT_ORIGIN,
       expectedRPID: RP_ID,
     });
 
@@ -250,12 +260,11 @@ router.post("/webauthn/registration/verify", async (req, res, next) => {
     const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
 
     const user = await User.findById(userId);
-    user.passkeys.push({
-      credId: Buffer.from(credentialID).toString("base64url"),
+    user.webAuthn = {
+      credentialId: Buffer.from(credentialID).toString("base64url"),
       publicKey: Buffer.from(credentialPublicKey).toString("base64url"),
-      counter,
-      transports: attestationResponse?.response?.transports || [],
-    });
+      signCount: counter,
+    };
     await user.save();
 
     pending.delete(String(userId));
@@ -269,14 +278,16 @@ router.get("/webauthn/authentication/options", async (req, res, next) => {
   try {
     const email = (req.query.email || "").toString().toLowerCase();
     const user = await User.findOne({ email });
-    if (!user || !user.passkeys.length) return res.status(404).json({ message: "No passkeys" });
+    if (!user || !user.webAuthn?.credentialId) return res.status(404).json({ message: "No passkey for user" });
 
     const options = generateAuthenticationOptions({
       rpID: RP_ID,
-      allowCredentials: user.passkeys.map(pk => ({
-        id: Buffer.from(pk.credId, "base64url"),
-        type: "public-key",
-      })),
+      allowCredentials: [
+        {
+          id: Buffer.from(user.webAuthn.credentialId, "base64url"),
+          type: "public-key",
+        },
+      ],
       userVerification: "preferred",
     });
 
@@ -294,25 +305,24 @@ router.post("/webauthn/authentication/verify", async (req, res, next) => {
     if (!pend) return res.status(400).json({ message: "No authentication in progress" });
 
     const user = await User.findById(userId);
-    const cred = user.passkeys.find(pk => pk.credId === assertionResponse.id);
-    if (!cred) return res.status(400).json({ message: "Unknown credential" });
+    if (!user?.webAuthn?.credentialId) return res.status(400).json({ message: "No credential stored" });
 
     const verification = await verifyAuthenticationResponse({
       response: assertionResponse,
       expectedChallenge: pend.challenge,
-      expectedOrigin: req.headers.origin || `http://${RP_ID}:3000`,
+      expectedOrigin: CLIENT_ORIGIN,
       expectedRPID: RP_ID,
       authenticator: {
-        credentialID: Buffer.from(cred.credId, "base64url"),
-        credentialPublicKey: Buffer.from(cred.publicKey, "base64url"),
-        counter: cred.counter,
-        transports: cred.transports || [],
+        credentialID: Buffer.from(user.webAuthn.credentialId, "base64url"),
+        credentialPublicKey: Buffer.from(user.webAuthn.publicKey, "base64url"),
+        counter: user.webAuthn.signCount || 0,
+        transports: assertionResponse?.response?.transports || [],
       },
     });
 
     if (!verification.verified) return res.status(400).json({ message: "Verification failed" });
 
-    cred.counter = verification.authenticationInfo.newCounter;
+    user.webAuthn.signCount = verification.authenticationInfo.newCounter || user.webAuthn.signCount;
     await user.save();
 
     pending.delete(String(userId));
