@@ -1,0 +1,40 @@
+name: cyp_app
+description: Catch Your Partner Flutter App
+publish_to: 'none' # Verhindert versehentliches Veröffentlichen auf pub.dev
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # HTTP Requests
+  http: ^1.2.2
+
+  # Lokale Speicherung (z.B. JWT Token)
+  shared_preferences: ^2.2.3
+
+  # UI & Layout Erweiterungen
+  google_fonts: ^6.2.1
+  flutter_spinkit: ^5.2.1
+
+  # Responsive Layouts
+  flutter_screenutil: ^5.9.0
+
+  # Falls später Bilder hochgeladen werden sollen
+  image_picker: ^1.0.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.2
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/icons/
