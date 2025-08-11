@@ -4,24 +4,23 @@ import cors from "cors";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 
-// Import Routes
+// Routen
 import authRoutes from "./routes/auth.js";
 import profileRoutes from "./routes/profile.js";
 import uploadRoutes from "./routes/upload.js";
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
 
-/* ------------------------- Core Middleware ------------------------- */
+/* -------------------------- Basis-Middleware -------------------------- */
 
-// JSON Body parser
+// Body-Parser
 app.use(express.json({ limit: "2mb" }));
 
-// CORS – sehr offen für lokale Entwicklung
+// CORS – offen (für lokale Tests / Render-Proxy okay)
 const corsOptions = {
-  origin: (origin, cb) => cb(null, true), // alles erlauben
+  origin: (_origin, cb) => cb(null, true),
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
@@ -29,36 +28,65 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-/* --------------------------- DB-Verbindung ------------------------- */
+/* ---------------------------- MongoDB Atlas --------------------------- */
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/cyp";
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  "mongodb://127.0.0.1:27017/cyp"; // Fallback für lokal
 
 mongoose.set("strictQuery", true);
 
-mongoose
-  .connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 15000,
-  })
-  .then(() => console.log("✅ MongoDB verbunden"))
-  .catch((err) => {
+async function connectDB() {
+  try {
+    await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 15000,
+    });
+    console.log("✅ MongoDB verbunden");
+  } catch (err) {
     console.error("❌ MongoDB Verbindung fehlgeschlagen:", err.message);
-  });
+    // Auf Render lieber NICHT hart beenden – Logs sehen & später retryen:
+    // process.exit(1);
+  }
+}
+connectDB();
 
-/* ------------------------------- Routes ---------------------------- */
+/* ------------------------------- Routes ------------------------------- */
 
-// Healthcheck
+// Healthcheck (für Render)
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, env: process.env.NODE_ENV || "development" });
 });
 
-// API routes
+// Optional: schneller DB-Check (zeigt Status & Collections)
+app.get("/api/dbcheck", async (req, res, next) => {
+  try {
+    const state = mongoose.connection.readyState; // 1=connected, 2=connecting, 0=disconnected, 3=disconnecting
+    let collections = [];
+    if (state === 1 && mongoose.connection.db) {
+      const cols = await mongoose.connection.db
+        .listCollections()
+        .toArray();
+      collections = cols.map((c) => c.name).sort();
+    }
+    res.json({
+      ok: state === 1,
+      state,
+      db: mongoose.connection.name || null,
+      collections,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// API-Routen
 app.use("/api/auth", authRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/api/upload", uploadRoutes);
 
-/* -------------------------- 404 & Fehler --------------------------- */
+/* -------------------------- 404 & Fehler-Handler ---------------------- */
 
-// 404 – Unbekannte Route
+// 404
 app.use((req, res) => {
   res.status(404).json({
     ok: false,
@@ -66,8 +94,8 @@ app.use((req, res) => {
   });
 });
 
-// Zentrale Fehlerbehandlung
-app.use((err, req, res, next) => {
+// Zentraler Fehler-Handler
+app.use((err, _req, res, _next) => {
   console.error("💥 Fehler:", err);
   const status = err.status || 500;
   res.status(status).json({
@@ -76,10 +104,10 @@ app.use((err, req, res, next) => {
   });
 });
 
-/* ------------------------------ Start ------------------------------ */
+/* -------------------------------- Start ------------------------------- */
 
-const PORT = Number(process.env.PORT) || 4000;
+const PORT = Number(process.env.PORT) || 4000; // Render liefert PORT
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`API running on http://0.0.0.0:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 API running on http://0.0.0.0:${PORT}`);
 });
