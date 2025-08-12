@@ -1,0 +1,25 @@
+echo "# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Env & Secrets
+.env
+.env.*
+!.env.example
+
+# Build/Runtime
+uploads/
+coverage/
+dist/
+.tmp/
+.cache/
+
+# Face model assets (nicht ins Repo)
+models/face-api/
+
+# OS/Editor
+.DS_Store
+.vscode/
+.idea/" > .gitignore
+node_modules
