@@ -11,7 +11,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import User from "../models/User.js";
-import PasswordReset from "../models/passwordReset.js";
+import PasswordReset from "../models/PasswordReset.js";
 import RefreshToken from "../models/refreshToken.js";
 
 // Social (Stubs – echte Token kommen vom Client)
